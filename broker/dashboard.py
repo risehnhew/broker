@@ -3037,14 +3037,19 @@ def _dashboard_html() -> str:
         return;
       }
       if (emptyEl) emptyEl.style.display = 'none';
-      paperDecisionsBody.innerHTML = shown.map(d => `<tr>
+      paperDecisionsBody.innerHTML = shown.map(d => {
+        const reason = d.decision_reason || d.reason || '';
+        const riskNote = d.risk_action && d.risk_action !== 'PASS' ? ` <span class="bad">[风控:${d.risk_action}]</span>` : '';
+        const blockNote = (!d.allow_new_buy && d.decision_action === 'BUY' && d.position === 0) ? ` <span class="warn">[未入选]</span>` : '';
+        return `<tr>
         <td><strong>${escapeHtml(d.symbol)}</strong></td>
         <td style="color:${actColor(d.action)};font-weight:600;">${escapeHtml(d.action)}</td>
         <td>${d.position || 0}</td>
         <td>$${Number(d.price || 0).toFixed(2)}</td>
         <td style="color:${actColor(d.ai_action)};">${escapeHtml(d.ai_action || '-')} <span class="tiny">(${d.ai_confidence || 0})</span></td>
-        <td class="tiny" style="max-width:320px;">${escapeHtml(d.reason || '')}</td>
-      </tr>`).join('');
+        <td class="tiny" style="max-width:320px;">${escapeHtml(reason)}${riskNote}${blockNote}</td>
+      </tr>`;
+      }).join('');
     }
     document.querySelectorAll('#paper-decisions-filter .filter-pill').forEach(btn => {
       btn.addEventListener('click', () => {

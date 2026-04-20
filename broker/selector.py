@@ -11,6 +11,7 @@ from typing import Any
 from broker.ai_analysis import AIAnalysis
 from broker.ai_analysis import AIAnalyzer
 from broker.ai_analysis import AISelection
+from broker.ai_analysis import AISelectionPick
 from broker.analysis import CandleAnalysis
 from broker.analysis import KlineAnalyzer
 from broker.analysis import RSIAnalyzer
@@ -300,17 +301,45 @@ class AISymbolSelector:
         }
 
     def _rank_with_ai(self, candidates: dict[str, SymbolCandidate]) -> AISelection:
-        if self.ai_analyzer is None or not self.ai_analyzer.is_enabled():
-            return AISelection(market_view="", picks=[])
-        try:
-            payload = [self._candidate_payload(item) for item in candidates.values()]
-            return self.ai_analyzer.select_symbols(payload, min(self.settings.max_selected_symbols, len(payload)))
-        except Exception as exc:  # noqa: BLE001
-            if self.ai_analyzer and self.ai_analyzer.is_auth_error(exc):
-                self._disable_ai_analyzer(f"MiniMax auth failed during symbol selection: {exc}")
-                return AISelection(market_view="", picks=[])
-            self.logger.warning("AI选股排序失败，降级为规则排序: %s", exc)
-            return AISelection(market_view="", picks=[])
+        """Select symbols using batch AI results — no second API call needed.
+
+        The batch analysis already gave us AI action + confidence for every candidate.
+        We pick the top-N by score (which already factors in AI confidence via
+        _fallback_rank) where AI action == BUY and confidence >= threshold.
+        """
+        max_selected = min(self.settings.max_selected_symbols, len(candidates))
+        scored: list[tuple[int, str, AISelectionPick]] = []  # (score, symbol, pick)
+
+        for candidate in candidates.values():
+            score, action, confidence, reason = self._fallback_rank(candidate)
+            scored.append((
+                score,
+                candidate.symbol,
+                AISelectionPick(
+                    symbol=candidate.symbol,
+                    score=score,
+                    action=action,
+                    confidence=confidence,
+                    reason=reason,
+                ),
+            ))
+
+        # Sort descending by score, then pick top N that have BUY signal
+        scored.sort(key=lambda x: x[0], reverse=True)
+        picks: list[AISelectionPick] = []
+        for _score, _symbol, pick in scored:
+            if len(picks) >= max_selected:
+                break
+            # Only include BUY signals in the final picks (HOLD/SELL filtered)
+            if pick.action == "BUY":
+                picks.append(pick)
+
+        self.logger.info(
+            "_rank_with_ai: %d candidates → %d BUY picks: %s",
+            len(candidates), len(picks),
+            [(p.symbol, p.score, p.action, p.confidence) for p in picks],
+        )
+        return AISelection(market_view="", picks=picks)
 
     def _normalize_picks(self, candidates: dict[str, SymbolCandidate], selection: AISelection) -> list[RankedSymbol]:
         ai_picks = {item.symbol: item for item in selection.picks if item.symbol in candidates}
