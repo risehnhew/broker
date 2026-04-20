@@ -2392,7 +2392,10 @@ def _dashboard_html() -> str:
     }
 
     function saveDraft() {
-      localStorage.setItem(draftKey, JSON.stringify(collectForm()));
+      // stock_universe comes from .env — never persist it to localStorage drafts
+      const payload = collectForm();
+      delete payload.stock_universe;
+      localStorage.setItem(draftKey, JSON.stringify(payload));
     }
 
     function loadDraft() {
@@ -2409,6 +2412,8 @@ def _dashboard_html() -> str:
       if (!draft) return;
       for (const [key, element] of Object.entries(form)) {
         if (!(key in draft)) continue;
+        // Skip blank values so .env defaults are preserved when draft has empty fields
+        if (draft[key] === '' || draft[key] == null) continue;
         if (element.type === 'checkbox') {
           element.checked = Boolean(draft[key]);
         } else {
@@ -2746,6 +2751,8 @@ def _dashboard_html() -> str:
       renderForm(data.settings);
       const draft = loadDraft();
       if (draft) {
+        // stock_universe is env-level — discard any stale value from localStorage draft
+        delete draft.stock_universe;
         applyDraft(draft);
       }
     }
@@ -2757,6 +2764,7 @@ def _dashboard_html() -> str:
       await loadLogs();
       const draft = loadDraft();
       if (draft) {
+        delete draft.stock_universe;
         applyDraft(draft);
       }
     }
