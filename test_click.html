@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Button Test</title></head>
+<body>
+<h1>Button Click Test</h1>
+<button id="btn1" onclick="alert('inline onclick works!')" style="background:green;color:#fff;padding:20px 40px;font-size:24px;">点击我测试1（inline onclick）</button>
+<br><br>
+<button id="btn2" style="background:blue;color:#fff;padding:20px 40px;font-size:24px;">点击我测试2（addEventListener）</button>
+<br><br>
+<div id="output"></div>
+<script>
+document.getElementById('btn2').addEventListener('click', function() {
+    document.getElementById('output').innerHTML += 'addEventListener click fired!<br>';
+    alert('addEventListener works!');
+});
+document.addEventListener('click', function(e) {
+    document.getElementById('output').innerHTML += 'Global click: tag=' + e.target.tagName + ' id=' + e.target.id + '<br>';
+}, true);
+</script>
+</body>
+</html>

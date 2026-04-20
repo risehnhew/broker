@@ -1,0 +1,9 @@
+timestamp,mode,symbol,action,quantity,price,reason,realized_pnl,position_after,net_profit_cumulative,equity
+20260417  16:10:00,sim,AAPL,BUY,10,271.59,signal_confirmed,,10,0.0,99989.7
+20260417  17:45:00,sim,AAPL,SELL,10,271.1,exit_signal,-4.9,0,-4.9,99989.7
+20260417  19:40:00,sim,AAPL,BUY,10,270.62,signal_confirmed,,10,-4.9,99989.7
+20260417  20:00:00,sim,AAPL,SELL,10,270.08,exit_signal,-5.4,0,-10.3,99989.7
+20260417  16:10:00,sim,AAPL,BUY,10,271.59,signal_confirmed,,10,0.0,99989.7
+20260417  17:45:00,sim,AAPL,SELL,10,271.1,exit_signal,-4.9,0,-4.9,99989.7
+20260417  19:40:00,sim,AAPL,BUY,10,270.62,signal_confirmed,,10,-4.9,99989.7
+20260417  20:00:00,sim,AAPL,SELL,10,270.08,exit_signal,-5.4,0,-10.3,99989.7

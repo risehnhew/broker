@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.egg-info/
+.env
+broker/.dashboard.lock
+*.py.bak
+.vscode/
+.idea/
+*.log
+.DS_Store
+dist/
+build/
