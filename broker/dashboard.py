@@ -3214,7 +3214,7 @@ def _dashboard_html() -> str:
     (function() {
       const paperUniEl = document.getElementById('paper-universe');
       if (paperUniEl && !paperUniEl.value) {
-        paperUniEl.value = 'AAPL,MSFT,NVDA,AMZN,META,GOOGL,TSLA,AMD,QCOM,JPM,GS,V,JNJ,LLY,HD,NKE,WMT,XOM,CVX';
+        paperUniEl.value = 'PLTR,TSLA,GME,AMC,MSTR,COIN,SMCI,RIVN,SOFI,NVDA,FFIE,WULF,BTBT,MULN,LCID,MRNA,ASTS,PLUG,OPTT,SQFT,NOVA';
       }
     })();
 
