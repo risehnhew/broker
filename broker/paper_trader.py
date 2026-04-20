@@ -306,7 +306,7 @@ class PaperTrader:
             "decision_action": decision.action,
             "decision_reason": decision.reason,
             "risk_action": risk.action,
-            "allow_new_buy": allow_buy,
+            "allow_new_buy": allow_new_buy,
             "price": round(price, 2),
             "position": position,
             "ai_action": ai_result.action,
