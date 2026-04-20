@@ -41,6 +41,11 @@ class AISelection:
     picks: list[AISelectionPick]
 
 
+@dataclass(frozen=True)
+class BatchAnalysisResult:
+    results: dict[str, AIAnalysis]  # symbol -> AIAnalysis, skips symbols that failed
+
+
 class AIAnalyzer:
     def __init__(self, base_url: str, api_key: str, model: str) -> None:
         self.logger = logging.getLogger(self.__class__.__name__)
@@ -185,6 +190,114 @@ class AIAnalyzer:
             risks=risks,
             reasoning_steps=reasoning_steps,
         )
+
+    def analyze_batch(self, candidates: list[dict]) -> BatchAnalysisResult:
+        """Analyze multiple candidates in a SINGLE API call to minimize token usage.
+
+        candidates: list of dicts with keys: symbol, bars, candle, news,
+                    base_signal, fast_sma, slow_sma
+        Returns BatchAnalysisResult with all AIAnalysis results.
+        """
+        if not self.enabled:
+            raise RuntimeError(self.disabled_reason or "AI analysis disabled")
+
+        batch_payload = []
+        for cand in candidates:
+            recent_bars = [
+                {
+                    "date": bar.date,
+                    "open": round(bar.open, 4),
+                    "high": round(bar.high, 4),
+                    "low": round(bar.low, 4),
+                    "close": round(bar.close, 4),
+                    "volume": round(bar.volume, 2),
+                }
+                for bar in cand["bars"][-20:]
+            ]
+            candle = cand["candle"]
+            news = cand["news"]
+            batch_payload.append({
+                "symbol": cand["symbol"],
+                "base_signal": cand["base_signal"],
+                "fast_sma": round(cand["fast_sma"], 4),
+                "slow_sma": round(cand["slow_sma"], 4),
+                "candle_analysis": {
+                    "trend": candle.trend,
+                    "bias": candle.bias,
+                    "score": candle.score,
+                    "patterns": candle.patterns,
+                    "last_close": round(candle.last_close, 4),
+                    "rsi": round(candle.rsi, 1),
+                    "volume_ratio": round(candle.volume_ratio, 2),
+                    "support": round(candle.support, 4),
+                    "resistance": round(candle.resistance, 4),
+                },
+                "news_analysis": {
+                    "score": news.score,
+                    "sentiment": news.sentiment,
+                    "headlines": news.headlines[:5],
+                },
+                "recent_bars_sample": [
+                    {"date": b.date[-8:], "close": round(b.close, 2)}
+                    for b in cand["bars"][-5:]
+                ],
+            })
+
+        system_prompt = (
+            "You are a stock trading analysis engine. Analyze ALL stocks in the user message "
+            "and return a single JSON object. "
+            'Schema: {"results":[{"symbol":"AAPL","action":"BUY|SELL|HOLD","confidence":0-100,'
+            '"sentiment":"BULLISH|BEARISH|NEUTRAL","summary":"...","risks":["..."],'
+            '"reasoning_steps":["step1: ...","step2: ...","step3: ..."]}]}. '
+            "Analyze each symbol independently. Be conservative — if evidence is mixed, return HOLD. "
+            "reasoning_steps should contain 3 concise Chinese sentences. "
+            "IMPORTANT: Return valid JSON only, no markdown, no explanation."
+        )
+
+        response = self.client.chat.completions.create(
+            model=self.model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": json.dumps({"candidates": batch_payload}, ensure_ascii=True)},
+            ],
+            temperature=0.1,
+            extra_body={"reasoning_split": True},
+        )
+
+        content = response.choices[0].message.content or ""
+        parsed = self._extract_json(content)
+
+        results: dict[str, AIAnalysis] = {}
+        raw_results = parsed.get("results", [])
+        if isinstance(raw_results, list):
+            for item in raw_results:
+                if not isinstance(item, dict):
+                    continue
+                symbol = str(item.get("symbol", "")).upper().strip()
+                if not symbol:
+                    continue
+                action = str(item.get("action", "HOLD")).upper()
+                if action not in {"BUY", "SELL", "HOLD"}:
+                    action = "HOLD"
+                confidence = max(0, min(int(item.get("confidence", 0)), 100))
+                sentiment = str(item.get("sentiment", "NEUTRAL")).upper()
+                if sentiment not in {"BULLISH", "BEARISH", "NEUTRAL"}:
+                    sentiment = "NEUTRAL"
+                raw_risks = item.get("risks", [])
+                risks = [str(r).strip() for r in raw_risks if str(r).strip()] if isinstance(raw_risks, list) else []
+                raw_steps = item.get("reasoning_steps", [])
+                reasoning_steps = [str(s).strip() for s in raw_steps if str(s).strip()] if isinstance(raw_steps, list) else []
+                results[symbol] = AIAnalysis(
+                    action=action,
+                    confidence=confidence,
+                    sentiment=sentiment,
+                    summary=str(item.get("summary", "")).strip(),
+                    risks=risks,
+                    reasoning_steps=reasoning_steps,
+                )
+
+        self.logger.info("Batch analysis: %d candidates → %d results", len(candidates), len(results))
+        return BatchAnalysisResult(results=results)
 
     def explain_decision(
         self,

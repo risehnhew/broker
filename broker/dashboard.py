@@ -3059,9 +3059,13 @@ def _dashboard_html() -> str:
       if (!data) return;
       const running = data.running;
       if (paperStatusBadge) {
-        paperStatusBadge.innerHTML = running
+        const phase = data.market_phase || '';
+        const phaseLabel = {'market': '🟢盘中', 'pre_market': '🟡盘前', 'after_hours': '🟡盘后', 'closed': '🔴休市'}[phase] || '';
+        const phaseHtml = phaseLabel ? `<span class="mini-pill" style="margin-left:6px;">${phaseLabel}</span>` : '';
+        paperStatusBadge.innerHTML = (running
           ? '<span class="badge ok">运行中</span>'
-          : (data.started_at ? '<span class="badge off">已暂停</span>' : '<span class="badge off">未启动</span>');
+          : (data.started_at ? '<span class="badge off">已暂停</span>' : '<span class="badge off">未启动</span>'))
+          + phaseHtml;
       }
       if (paperStartingEl) paperStartingEl.textContent = paperFmt$(data.starting_cash);
       if (paperEquityEl)   paperEquityEl.textContent   = paperFmt$(data.total_equity);
@@ -3481,6 +3485,7 @@ def _serialize_paper(state=None) -> dict[str, Any]:
         "last_run_at": state.last_run_at,
         "status_msg": state.status_msg,
         "last_cycle_decisions": list(getattr(state, "last_cycle_decisions", []) or []),
+        "market_phase": getattr(state, "market_phase", "") or "",
         "positions": {
             sym: {
                 "symbol": pos.symbol,

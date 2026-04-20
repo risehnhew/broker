@@ -6,6 +6,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from broker.ai_analysis import AIAnalyzer
 from broker.config import Settings
@@ -50,6 +51,7 @@ class PaperState:
     last_run_at: str = ""
     status_msg: str = ""
     last_cycle_decisions: list[dict[str, Any]] = field(default_factory=list)
+    market_phase: str = ""  # market / pre_market / after_hours / closed
 
 
 class PaperTrader:
@@ -93,6 +95,31 @@ class PaperTrader:
     def stop(self) -> None:
         self._stop_event.set()
 
+    def _get_market_phase(self) -> tuple[str, int]:
+        """Returns (phase_name, poll_interval_seconds).
+
+        Phase: market → 60s (盘中，每60s分析)
+                pre_market → 300s (盘前，每5分钟)
+                after_hours → 300s (盘后，每5分钟)
+                closed → 600s (周末/休市，每10分钟)
+        """
+        try:
+            et = datetime.now(ZoneInfo("America/New_York"))
+            dow = et.weekday()
+            hour, minute = et.hour, et.minute
+            total_min = hour * 60 + minute
+            # Market: Mon-Fri, 9:30-16:00 ET
+            if dow < 5 and 9 * 60 + 30 <= total_min < 16 * 60:
+                return ("market", 60)
+            elif dow < 5 and 4 * 60 <= total_min < 9 * 60 + 30:
+                return ("pre_market", 300)
+            elif dow < 5 and 16 * 60 <= total_min < 20 * 60:
+                return ("after_hours", 300)
+            else:
+                return ("closed", 600)
+        except Exception:  # noqa: BLE001
+            return ("market", 60)
+
     def run_forever(self) -> None:
         self._stop_event.clear()
         with self._lock:
@@ -123,20 +150,26 @@ class PaperTrader:
             while not self._stop_event.is_set():
                 with self._lock:
                     self._status_msg = "交易轮次执行中..."
+                phase, poll_interval = self._get_market_phase()
+                ai_enabled = phase == "market"  # Only call MiniMax during market hours
+                with self._lock:
+                    self._market_phase = phase
                 try:
-                    self._run_once()
+                    self._run_once(ai_enabled=ai_enabled)
                     self._record_equity()
+                    phase_label = {"market": "盘中", "pre_market": "盘前", "after_hours": "盘后", "closed": "休市"}.get(phase, phase)
                     with self._lock:
                         self._cycle_count += 1
                         self._last_run_at = datetime.now().isoformat(timespec="seconds")
-                        self._status_msg = f"等待下一轮（每 {self.settings.poll_interval_seconds}s 一次）"
+                        interval_desc = f"{poll_interval // 60}分钟" if poll_interval >= 60 else f"{poll_interval}秒"
+                        self._status_msg = f"【{phase_label}】等待下一轮（每 {interval_desc} 一次）"
                         self._last_error = ""
                 except Exception as exc:  # noqa: BLE001
                     self.logger.warning("[PaperTrader] 本轮异常: %s", exc)
                     with self._lock:
                         self._last_error = str(exc)
                         self._status_msg = "本轮异常，等待重试"
-                if self._stop_event.wait(self.settings.poll_interval_seconds):
+                if self._stop_event.wait(poll_interval):
                     break
         finally:
             self.client.disconnect_and_stop()
@@ -149,7 +182,7 @@ class PaperTrader:
         with self._lock:
             self._status_msg = msg
 
-    def _run_once(self) -> None:
+    def _run_once(self, ai_enabled: bool = True) -> None:
         self.logger.info("[PaperTrader] 开始交易轮次")
         self._current_cycle_decisions = []
         with self._lock:
@@ -165,18 +198,27 @@ class PaperTrader:
         total = len(universe)
 
         if self.settings.enable_ai_stock_selection:
-            self._set_status(f"AI 选股分析中，共 {total} 只股票…")
+            if ai_enabled:
+                self._set_status(f"AI 选股分析中，共 {total} 只股票…")
+            else:
+                self._set_status(f"数据收集中（非盘中，跳过 AI 分析）…")
             try:
                 def _progress(idx: int, n: int, sym: str) -> None:
-                    self._set_status(f"AI 选股 {idx}/{n}: {sym}…")
+                    prefix = "AI 选股" if ai_enabled else "获取数据"
+                    self._set_status(f"{prefix} {idx}/{n}: {sym}…")
 
-                selection = self.symbol_selector.select(self.client, current_positions, on_progress=_progress)
+                selection = self.symbol_selector.select(self.client, current_positions, on_progress=_progress, ai_enabled=ai_enabled)
                 cached_candidates.update(selection.candidates)
                 selected_symbols = set(selection.selected_symbols)
-                self._set_status(
-                    f"AI 选股完成，入选 {len(selected_symbols)} 只: "
-                    + (", ".join(sorted(selected_symbols)) or "无")
-                )
+                if ai_enabled:
+                    self._set_status(
+                        f"AI 选股完成，入选 {len(selected_symbols)} 只: "
+                        + (", ".join(sorted(selected_symbols)) or "无")
+                    )
+                else:
+                    self._set_status(
+                        f"数据收集完成（非盘中，跳过 AI）"
+                    )
                 self.logger.info(
                     "[PaperTrader] AI选股结果: %s",
                     ", ".join(sorted(selected_symbols)) or "无",
@@ -403,4 +445,5 @@ class PaperTrader:
                 last_run_at=self._last_run_at,
                 status_msg=self._status_msg,
                 last_cycle_decisions=list(self._last_cycle_decisions),
+                market_phase=getattr(self, '_market_phase', ''),
             )

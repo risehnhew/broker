@@ -10,3 +10,6 @@ broker/.dashboard.lock
 .DS_Store
 dist/
 build/
+
+# IB Gateway installer (download separately)
+downloads/

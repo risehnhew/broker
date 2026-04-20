@@ -29,6 +29,16 @@ from broker.strategy import StrategySignal
 
 
 @dataclass(frozen=True)
+class _CandidateBase:
+    symbol: str
+    position: int
+    bars: list[HistoricalBar]
+    signal: StrategySignal
+    candle: CandleAnalysis
+    news: NewsAnalysis
+
+
+@dataclass(frozen=True)
 class SymbolCandidate:
     symbol: str
     position: int
@@ -78,6 +88,21 @@ class AISymbolSelector:
         self.news_analyzer = NewsAnalyzer()
 
     def build_candidate(self, client: IBClient, symbol: str, position: int = 0) -> SymbolCandidate:
+        base = self.build_candidate_data(client, symbol, position)
+        ai = self._analyze_ai(base.symbol, base.bars, base.candle, base.news,
+                               base.signal.action, base.signal.fast_sma, base.signal.slow_sma)
+        return SymbolCandidate(
+            symbol=base.symbol,
+            position=base.position,
+            bars=base.bars,
+            signal=base.signal,
+            candle=base.candle,
+            news=base.news,
+            ai=ai,
+        )
+
+    def build_candidate_data(self, client: IBClient, symbol: str, position: int = 0) -> _CandidateBase:
+        """Build candidate data without AI analysis (for batch processing)."""
         bars = client.get_historical_bars(
             symbol=symbol,
             duration=self.settings.duration,
@@ -88,15 +113,13 @@ class AISymbolSelector:
         signal = self.strategy.evaluate(closes=closes, position=position)
         candle = self.kline_analyzer.analyze(bars)
         news = self._analyze_news(client, symbol)
-        ai = self._analyze_ai(symbol, bars, candle, news, signal.action, signal.fast_sma, signal.slow_sma)
-        return SymbolCandidate(
+        return _CandidateBase(
             symbol=symbol,
             position=position,
             bars=bars,
             signal=signal,
             candle=candle,
             news=news,
-            ai=ai,
         )
 
     def select(
@@ -104,6 +127,7 @@ class AISymbolSelector:
         client: IBClient,
         positions: dict[str, int] | None = None,
         on_progress: Any = None,
+        ai_enabled: bool = True,
     ) -> SelectionResult:
         position_map = {symbol.upper(): int(value) for symbol, value in (positions or {}).items()}
         universe = self._get_universe(position_map)
@@ -117,28 +141,29 @@ class AISymbolSelector:
         progress_lock = threading.Lock()
         max_workers = min(4, max(1, len(universe)))
 
-        def _build_one(symbol: str):
+        # Step 1: Build all candidate data WITHOUT AI (parallel, fast)
+        def _build_base(symbol: str):
             t0 = time.perf_counter()
-            cand = self.build_candidate(client, symbol, position_map.get(symbol, 0))
+            base = self.build_candidate_data(client, symbol, position_map.get(symbol, 0))
             elapsed = time.perf_counter() - t0
-            return symbol, cand, elapsed
+            return symbol, base, elapsed
 
+        all_bases: list[_CandidateBase] = []
         with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="selector") as pool:
-            futures = {pool.submit(_build_one, sym): sym for sym in universe}
+            futures = {pool.submit(_build_base, sym): sym for sym in universe}
             for fut in as_completed(futures):
                 sym = futures[fut]
                 try:
-                    symbol, cand, elapsed = fut.result()
-                    candidates[symbol] = cand
+                    symbol, base, elapsed = fut.result()
+                    all_bases.append(base)
                     with progress_lock:
                         completed_count += 1
                         done = completed_count
                     self.logger.info(
-                        "AI选股完成 %s，用时 %.2fs，base=%s ai=%s/%s news=%s(%s)",
+                        "数据获取 %s，用时 %.2fs，base=%s news=%s",
                         symbol, elapsed,
-                        cand.signal.action,
-                        cand.ai.action, cand.ai.confidence,
-                        cand.news.sentiment, cand.news.score,
+                        base.signal.action,
+                        base.news.sentiment,
                     )
                     if on_progress:
                         try:
@@ -146,16 +171,50 @@ class AISymbolSelector:
                         except Exception:  # noqa: BLE001
                             pass
                 except Exception as exc:  # noqa: BLE001
-                    self.logger.warning("AI选股构建 %s 失败: %s", sym, exc)
+                    self.logger.warning("数据获取 %s 失败: %s", sym, exc)
                     errors.append({"symbol": sym, "message": str(exc), "raw": str(exc)})
 
-        if not candidates:
+        if not all_bases:
             return SelectionResult(
                 market_view="",
                 picks=[],
                 selected_symbols=[],
                 candidates={},
                 errors=errors,
+            )
+
+        # Step 2: ONE batch AI call for all candidates (only during market hours)
+        if ai_enabled:
+            self.logger.info("批量AI分析 %d 只股票...", len(all_bases))
+            t_ai = time.perf_counter()
+            ai_results = self._analyze_ai_batch(all_bases)
+            self.logger.info("批量AI分析完成，用时 %.2fs", time.perf_counter() - t_ai)
+        else:
+            # Outside market hours: skip MiniMax, use fallback for all
+            self.logger.info("非盘中时段，跳过 MiniMax API 调用（%d 只用 fallback）", len(all_bases))
+            ai_results = {b.symbol: self._fallback_ai_analysis() for b in all_bases}
+
+        # Step 3: Assemble final candidates with AI results
+        for base in all_bases:
+            ai = ai_results.get(base.symbol, self._fallback_ai_analysis())
+            candidates[base.symbol] = SymbolCandidate(
+                symbol=base.symbol,
+                position=base.position,
+                bars=base.bars,
+                signal=base.signal,
+                candle=base.candle,
+                news=base.news,
+                ai=ai,
+            )
+
+        # Report per-symbol AI results
+        for sym, cand in candidates.items():
+            self.logger.info(
+                "AI选股完成 %s，base=%s ai=%s/%s news=%s(%s)",
+                sym,
+                cand.signal.action,
+                cand.ai.action, cand.ai.confidence,
+                cand.news.sentiment, cand.news.score,
             )
 
         ai_selection = self._rank_with_ai(candidates)
@@ -391,6 +450,40 @@ class AISymbolSelector:
                 return self._fallback_ai_analysis()
             self.logger.warning("%s AI交易分析失败: %s", symbol, exc)
             return self._fallback_ai_analysis()
+
+    def _analyze_ai_batch(self, bases: list[_CandidateBase]) -> dict[str, AIAnalysis]:
+        """Analyze multiple candidates in ONE API call. Returns {symbol: AIAnalysis}."""
+        if not bases:
+            return {}
+        if self.ai_analyzer is None or not self.ai_analyzer.is_enabled():
+            return {b.symbol: self._fallback_ai_analysis() for b in bases}
+        try:
+            candidates_payload = [
+                {
+                    "symbol": b.symbol,
+                    "bars": b.bars,
+                    "candle": b.candle,
+                    "news": b.news,
+                    "base_signal": b.signal.action,
+                    "fast_sma": b.signal.fast_sma,
+                    "slow_sma": b.signal.slow_sma,
+                }
+                for b in bases
+            ]
+            result = self.ai_analyzer.analyze_batch(candidates_payload)
+            return result.results
+        except Exception as exc:  # noqa: BLE001
+            if self.ai_analyzer and self.ai_analyzer.is_auth_error(exc):
+                self._disable_ai_analyzer(f"MiniMax auth failed during batch analysis: {exc}")
+            self.logger.warning("批量AI分析失败，降级为逐只分析: %s", exc)
+            # Fallback: analyze one by one
+            results: dict[str, AIAnalysis] = {}
+            for b in bases:
+                results[b.symbol] = self._analyze_ai(
+                    b.symbol, b.bars, b.candle, b.news,
+                    b.signal.action, b.signal.fast_sma, b.signal.slow_sma,
+                )
+            return results
 
     def build_educational_report(
         self,
